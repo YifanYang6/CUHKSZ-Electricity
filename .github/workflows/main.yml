@@ -54,9 +54,9 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
           IS_PR: ${{ github.event_name == 'pull_request' }}
         run: |
-          if [ $GOOS = "windows" ]; then export BINARY_SUFFIX="$BINARY_SUFFIX.exe"; fi
+          if [ $GOOS = "windows" ]; then export BINARY_SUFFIX=".exe"; fi
           if $IS_PR ; then echo $PR_PROMPT; fi
-          export BINARY_NAME="${{ env.BINARY_PREFIX }}${{ env.GOOS }}_${{ env.GOARCH }}${{ env.BINARY_SUFFIX }}"
+          export BINARY_NAME="${{ env.BINARY_PREFIX }}${{ env.GOOS }}_${{ env.GOARCH }}$BINARY_SUFFIX"
           export CGO_ENABLED=0
           go build -o "output/$BINARY_NAME" -trimpath -ldflags "$LD_FLAGS" .
       - name: Upload artifact
