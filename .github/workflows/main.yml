@@ -1,0 +1,95 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - '**'  # Triggers on any branch push
+    tags:
+      - 'v*'  # Triggers release only on version tags
+  pull_request:
+
+env:
+  BINARY_PREFIX: "CUHKSZ-Electricity_"
+  BINARY_SUFFIX: ""
+  PR_PROMPT: "::warning:: Build artifact will not be uploaded due to the workflow is trigged by pull request."
+  LD_FLAGS: "-w -s"
+
+jobs:
+  build:
+    name: Build binary CI
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        goos: [linux, windows, darwin]
+        goarch: ["386", amd64, arm, arm64]
+        exclude:
+          - goos: darwin
+            goarch: arm
+          - goos: darwin
+            goarch: "386"
+          - goos: windows
+            goarch: arm64
+      fail-fast: true
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Setup Go environment
+        uses: actions/setup-go@v4
+        with:
+          go-version: 1.19
+
+      - name: Cache Go modules
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ matrix.goos }}-${{ matrix.goarch }}
+
+      - name: Build binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          IS_PR: ${{ github.event_name == 'pull_request' }}
+        run: |
+          if [ $GOOS = "windows" ]; then export BINARY_SUFFIX="$BINARY_SUFFIX.exe"; fi
+          if $IS_PR ; then echo $PR_PROMPT; fi
+          export BINARY_NAME="$BINARY_PREFIX$GOOS_$GOARCH$BINARY_SUFFIX"
+          export CGO_ENABLED=0
+          go build -o "output/$BINARY_NAME" -trimpath -ldflags "$LD_FLAGS" .
+      - name: Upload artifact
+        uses: actions/upload-artifact@v3
+        if: ${{ github.event_name != 'pull_request' }}
+        with:
+          name: ${{ matrix.goos }}_${{ matrix.goarch }}
+          path: output/
+  release:
+      name: Create Release
+      runs-on: ubuntu-latest
+      needs: build
+      if: startsWith(github.ref, 'refs/tags/')
+      steps:
+        
+        - name: Checkout code
+          uses: actions/checkout@v3
+
+        - name: Download build artifacts
+          uses: actions/download-artifact@v3
+          with:
+            path: ./output
+
+        - name: Package artifacts
+          run: |
+            mkdir -p packaged
+            for dir in ./output/*/; do
+              dir_name=$(basename "$dir")
+              zip -r "packaged/${dir_name}.zip" "$dir"
+            done
+            
+        - name: Create GitHub Release
+          uses: softprops/action-gh-release@v2
+          with:
+            body: "Release of version ${{ github.ref_name }}"
+            files: packaged/*

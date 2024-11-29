@@ -1,0 +1,29 @@
+{
+    "Telegram": {
+        "BotToken": "your-bot-token-here", 
+        "UserID": "your-user-id-here", 
+        "APIHost": "api.telegram.org",
+        "Proxy": "your-proxy-address-here" 
+    },
+    "RequestData": {
+        "API": "https://mobile.cuhk.edu.cn/api/work/charge/getHomeInfo", 
+        "Headers": {
+            "Host": "mobile.cuhk.edu.cn",
+            "Connection": "keep-alive",
+            "Authorization": "your-authorization-token-here", 
+            "User-Agent": "your-user-agent-here", 
+            "Content-Type": "application/json;charset=UTF-8",
+            "Origin": "https://mobile.cuhk.edu.cn",
+            "X-Requested-With": "com.tencent.wework"
+        },
+        "Text": "x栋",
+        "Campus": "xx书院", 
+        "Source": "ISIMS", 
+        "ID": 2, 
+        "Build": "x栋", 
+        "Room": "eg: 299", 
+        "RoomID": "好像必须抓包才能找到", 
+        "Lang": "EN", 
+        "Terminal": "APP"
+    }
+}
