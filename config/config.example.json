@@ -5,6 +5,11 @@
         "APIHost": "api.telegram.org",
         "Proxy": "your-proxy-address-here" 
     },
+    "Email": {
+        "CredentialsFile": "config/gmail.json",
+        "TokenFile": "config/token.json",
+        "User": "user@example.com"
+    },
     "RequestData": {
         "API": "https://mobile.cuhk.edu.cn/api/work/charge/getHomeInfo", 
         "Headers": {
