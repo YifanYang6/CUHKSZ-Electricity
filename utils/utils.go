@@ -2,14 +2,23 @@ package utils
 
 import (
 	"bytes"
+	"context"
+	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"time"
+
+	"golang.org/x/oauth2"
+	"golang.org/x/oauth2/google"
+	gmail "google.golang.org/api/gmail/v1"
 )
 
 // Structs for Telegram and RequestData remain the same as previously defined
@@ -18,6 +27,13 @@ type Telegram struct {
 	UserID   string
 	APIHost  string
 	Proxy    string
+}
+
+// Email holds Gmail API credential files and user info
+type Email struct {
+	CredentialsFile string // path to credentials.json
+	TokenFile       string // path to token.json
+	User            string // email address of the authenticated user
 }
 
 type RequestData struct {
@@ -36,6 +52,7 @@ type RequestData struct {
 
 type Config struct {
 	Telegram    Telegram
+	Email       Email
 	RequestData RequestData
 }
 
@@ -87,8 +104,27 @@ func (R *RequestData) GetMsg() (msg string, err error) {
 		req.Header.Set(key, value)
 	}
 
-	// Create an HTTP client and perform the request
-	client := &http.Client{}
+	// Create an HTTP client with more permissive TLS configuration
+	// Create HTTP client with Go 1.24 compatible TLS configuration
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: true,
+				MinVersion:         tls.VersionTLS10,
+				MaxVersion:         tls.VersionTLS12,
+				CipherSuites: []uint16{
+					tls.TLS_RSA_WITH_AES_128_CBC_SHA,
+					tls.TLS_RSA_WITH_AES_256_CBC_SHA,
+					tls.TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA,
+					tls.TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA,
+					tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+					tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+				},
+			},
+			ForceAttemptHTTP2: false,
+		},
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("failed to perform HTTP request: %w", err)
@@ -114,25 +150,21 @@ func (R *RequestData) GetMsg() (msg string, err error) {
 		return "", fmt.Errorf("failed to decode JSON response: %w", err)
 	}
 
-	// Process the response
-	if res.Status != 200 {
-		msg = fmt.Sprintf("Failed to retrieve data. Status: %d", res.Status)
+	// Process the response with remaining-based logic
+	usedAmp := res.Data.UsedAmp
+	allAmp := res.Data.AllAmp
+	remaining := allAmp - usedAmp
+	const warningThreshold = 20.0
+	if remaining < 0 {
+		msg = fmt.Sprintf("Warning: Exceeded limit by %.2f!", -remaining)
+	} else if remaining <= warningThreshold {
+		msg = fmt.Sprintf("Warning: Remaining electricity is low: %.2f", remaining)
 	} else {
-		usedAmp := res.Data.UsedAmp
-		allAmp := res.Data.AllAmp
-		msg = fmt.Sprintf("Used Amp: %.2f, All Amp: %.2f", usedAmp, allAmp)
-
-		if allAmp < usedAmp {
-			msg = fmt.Sprintf("Warning: Used Amp (%.2f) exceeds All Amp (%.2f)!", usedAmp, allAmp)
-		} else if allAmp < usedAmp+10 {
-			msg = fmt.Sprintf("Warning: Amp usage is close to the limit. Used: %.2f, All: %.2f", usedAmp, allAmp)
-		} else {
-			msg = fmt.Sprintf("Amp usage is within limits. Used: %.2f, All: %.2f", usedAmp, allAmp)
-		}
+		msg = fmt.Sprintf("Remaining electricity: %.2f", remaining)
 	}
-
 	return msg, nil
 }
+
 func checkProxyAddr(proxyAddr string) (u *url.URL, err error) {
 	if proxyAddr == "" {
 		return nil, errors.New("proxy addr is empty")
@@ -187,5 +219,87 @@ func (T *Telegram) SendMsg(text string) (err error) {
 	}
 
 	fmt.Println("Telegram Bot push succeeded")
+	return nil
+}
+
+// getTokenFromWeb requests a token from the web, then returns the retrieved token
+func getTokenFromWeb(config *oauth2.Config) (*oauth2.Token, error) {
+	authURL := config.AuthCodeURL("state-token", oauth2.AccessTypeOffline)
+	fmt.Printf("Go to the following link in your browser then type the "+
+		"authorization code: \n%v\n", authURL)
+
+	var authCode string
+	if _, err := fmt.Scan(&authCode); err != nil {
+		return nil, fmt.Errorf("unable to read authorization code: %w", err)
+	}
+
+	tok, err := config.Exchange(context.TODO(), authCode)
+	if err != nil {
+		return nil, fmt.Errorf("unable to retrieve token from web: %w", err)
+	}
+	return tok, nil
+}
+
+// saveToken saves a token to a file path
+func saveToken(path string, token *oauth2.Token) error {
+	fmt.Printf("Saving credential file to: %s\n", path)
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0600)
+	if err != nil {
+		return fmt.Errorf("unable to cache oauth token: %w", err)
+	}
+	defer f.Close()
+	return json.NewEncoder(f).Encode(token)
+}
+
+// getClient reads token file or performs OAuth flow to get HTTP client
+func getClient(ctx context.Context, config *oauth2.Config, tokenFile string) (*http.Client, error) {
+	b, err := ioutil.ReadFile(tokenFile)
+	if err != nil {
+		// Token file doesn't exist, get token from web
+		token, err := getTokenFromWeb(config)
+		if err != nil {
+			return nil, err
+		}
+		if err := saveToken(tokenFile, token); err != nil {
+			return nil, err
+		}
+		return config.Client(ctx, token), nil
+	}
+
+	token := &oauth2.Token{}
+	if err := json.Unmarshal(b, token); err != nil {
+		return nil, fmt.Errorf("unable to parse token file: %w", err)
+	}
+	return config.Client(ctx, token), nil
+}
+
+// SendEmail sends a message via Gmail API
+func (E *Email) SendEmail(body string) error {
+	ctx := context.Background()
+	b, err := ioutil.ReadFile(E.CredentialsFile)
+	if err != nil {
+		return fmt.Errorf("unable to read credentials file: %w", err)
+	}
+	cfg, err := google.ConfigFromJSON(b, gmail.GmailSendScope)
+	if err != nil {
+		return fmt.Errorf("unable to parse client secret file: %w", err)
+	}
+	client, err := getClient(ctx, cfg, E.TokenFile)
+	if err != nil {
+		return err
+	}
+	srv, err := gmail.New(client)
+	if err != nil {
+		return fmt.Errorf("unable to retrieve Gmail client: %w", err)
+	}
+	// create RFC822 email message
+	msgStr := fmt.Sprintf("To: %s\r\nSubject: Electricity Alert\r\n\r\n%s", E.User, body)
+	encoded := base64.URLEncoding.EncodeToString([]byte(msgStr))
+	msg := &gmail.Message{Raw: encoded}
+	_, err = srv.Users.Messages.Send("me", msg).Do()
+	if err != nil {
+		return fmt.Errorf("unable to send email via Gmail API: %w", err)
+	}
+	log.Println("Gmail API push succeeded")
 	return nil
 }
